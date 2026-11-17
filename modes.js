@@ -1,8 +1,11 @@
 'use strict';
 
 const BASE_SETTINGS = Object.freeze({
-  'control:altitude_max': '10000',
+  'control:altitude_max': '5000',
   'control:outdoor': 'FALSE',
+  'control:euler_angle_max': '0.20944',
+  'control:control_vz_max': '700',
+  'control:control_yaw': '3',
   'control:indoor_euler_angle_max': '0.20944',
   'control:indoor_control_vz_max': '700',
   'control:indoor_control_yaw': '3',
@@ -44,6 +47,8 @@ class TrainingMode extends Mode {
     super('training', 'TRAINING', {
       'control:altitude_max': '1500',
       'control:outdoor': 'FALSE',
+      'control:euler_angle_max': '0.12',
+      'control:control_vz_max': '300',
       'control:indoor_euler_angle_max': '0.12',
       'control:indoor_control_vz_max': '300',
       'control:indoor_control_yaw': '1'
@@ -56,6 +61,8 @@ class IndoorMode extends Mode {
     super('indoor', 'INDOOR', {
       'control:altitude_max': '2000',
       'control:outdoor': 'FALSE',
+      'control:euler_angle_max': '0.16',
+      'control:control_vz_max': '700',
       'control:indoor_euler_angle_max': '0.16',
       'control:indoor_control_vz_max': '700',
       'control:indoor_control_yaw': '1.74533'
@@ -68,6 +75,8 @@ class OutdoorMode extends Mode {
     super('outdoor', 'OUTDOOR', {
       'control:altitude_max': '3000',
       'control:outdoor': 'TRUE',
+      'control:euler_angle_max': '0.30',
+      'control:control_vz_max': '1000',
       'control:outdoor_euler_angle_max': '0.30',
       'control:outdoor_control_vz_max': '1000',
       'control:outdoor_control_yaw': '3.49066'

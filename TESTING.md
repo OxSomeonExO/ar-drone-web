@@ -306,9 +306,18 @@ server's commands and firmware settings against the aircraft.
   held gaz input. Releasing cancels an unacknowledged throttle takeoff; LAND
   remains the explicit landing control.
 - Added actual live UDP AT*PCMD logging and matching mock logs.
+- Fixed configuration delivery: every config now queues `AT*CONFIG_IDS` with
+  session/user/app IDs first, retries up to three times when the command ACK
+  bit is not observed, and reapplies after a navdata reconnect. Live startup
+  requests the selected settings back over TCP 5559; the ACK alone is not
+  treated as proof that the drone stored a value.
+- Corrected the default height cap from 10,000 mm to the supported 5,000 mm
+  maximum, and capped the slider/software guard at 5.0 m.
 - Explicitly configure nonzero firmware limits: 700 mm/s vertical speed and
   3 rad/s yaw. Keep the software altitude guard in metres and convert only the
   firmware height setting to millimetres.
+- Added the Settings → Flight limits panel with raw and converted altitude,
+  active limits, mode, battery, last gaz, and command-ACK state.
 - Added unit tests for altitude units/guard behavior, package PCMD encoding,
   and direction-setter behavior.
 - Doubled joystick and knob dimensions in landscape, clamped the controls to
@@ -316,7 +325,7 @@ server's commands and firmware settings against the aircraft.
 - Retained the existing two-stick command loop, watchdog hover, and stop on
   release; changed the speed control to clamp at a nonzero 10% minimum.
 
-## Mode system and 10 m height limit
+## Mode system and 5 m height limit
 
 ### Mock test
 
@@ -333,16 +342,18 @@ node server.js
 
 Expected test output includes `PASS mode presets...`. The server should report
 `[SRV] *** MOCK MODE — no real drone ***` and
-`[MOCK] config(control:altitude_max, 10000)`. Open
+`[AT*CONFIG MOCK] AT*CONFIG=...,"control:altitude_max","5000"`. Each config
+must have an `AT*CONFIG_IDS` line immediately before it. Open
 `http://127.0.0.1:3000` (or the computer's printed LAN address) in a browser.
 The status must say **Connected · MOCK** and show **87%**; that battery is
 simulated.
 
 1. Open **Modes → TRAINING**. The first-use hint should appear, the HUD should
    show TRAINING, and the height should become **1.5 m**. The server logs
-   `control:altitude_max, 1500` and the training vertical-speed/tilt settings.
+   `AT*CONFIG_IDS` before `control:altitude_max, 1500`, and the training
+   vertical-speed/tilt settings.
 2. Select **Manual**. The preset should restore and the height should return to
-   **10.0 m** (`control:altitude_max, 10000`). Indoor and Outdoor should set
+   **5.0 m** (`control:altitude_max, 5000`). Indoor and Outdoor should set
    their corresponding presets; Outdoor is capped at **3.0 m**.
 3. Open **TEST MOTORS**. The first confirmation shows the large text
    **“Remove all 4 propellers first”**; tick the box and accept the second
@@ -351,8 +362,10 @@ simulated.
    another message, disconnect, or after 2 seconds. “Test all in sequence”
    runs each simulated test for at most 2 seconds. The stock-drone mode is
    intentionally unavailable because SDK `AT*PWM` is prototype-only.
-4. Change the limit slider to 10 m. It should show `10.0 m`, and the server
-   should log `control:altitude_max, 10000`. Open `/health` to see the same
+4. Change the limit slider to 5 m. It should show `5.0 m`, and the server
+   should log `control:altitude_max, 5000`. Open Settings → Flight limits or
+   `/health` to see raw altitude mm, altitude metres, the same limit in mm/m,
+   vertical speed, tilt, mode, battery, and last PCMD gaz.
    altitude, battery, mode, navdata age, client count, and video FPS summary.
 5. Select **Director**, take off in mock mode, start a scripted shot, then touch
    either stick. The countdown/progress should appear and stick touch should
@@ -380,9 +393,11 @@ land automatically at the threshold. This proves only simulated behavior.
 - [ ] Connect the computer to the drone Wi-Fi, clear mock mode, then run
   `node diagnose.js`. Confirm live navdata, battery, altitude, and state flags.
 - [ ] Start the web server in LIVE mode and confirm the page says
-  **Connected · LIVE**. Check **Settings → Height Limit** and the server's
-  `altitude_max → 10000 mm` acknowledgement. An acknowledgement alone does not
-  prove the aircraft applied the value.
+  **Connected · LIVE**. Check that each `AT*CONFIG_IDS` precedes its
+  `AT*CONFIG`, the command is acknowledged, and TCP 5559 readback prints
+  `control:altitude_max`, `control:control_vz_max`,
+  `control:euler_angle_max`, and `control:outdoor`. An acknowledgement alone
+  does not prove the aircraft applied the value.
 - [ ] With propellers still off, verify joystick command logs and LAND. Do not
   hold the aircraft while motors run. Do not expect lift or meaningful altitude
   control without propellers.
@@ -403,8 +418,8 @@ presets, `AT*PCMD` for progressive four-axis movement, `AT*REF` for takeoff,
 landing, and emergency reset, and `AT*FTRIM` for flat trim. The implementation
 does **not** send `AT*PWM`, `PCMD_MAG`, flip `AT*ANIM`, or magnetometer `AT*CALIB`.
 
-Mode-system changes are in `modes.js`, `server.js`, `public/index.html`,
-`test/modes.test.js`, `test/control.test.js`, and `package.json`; related user
-guidance is in `README.md` and this file. The 10 m ceiling is applied both in
+Mode-system changes are in `modes.js`, `server.js`, `control.js`,
+`public/index.html`, `test/modes.test.js`, and `test/control.test.js`; related user
+guidance is in `README.md` and this file. The 5 m ceiling is applied both in
 the UI/server software guard and through the firmware `control:altitude_max`
 setting, while Outdoor remains capped at 3 m.

@@ -15,16 +15,20 @@ const MOCK_MODE = process.env.DRONE_MOCK === '1';
 
 const os      = require('os');
 const http    = require('http');
+const net     = require('net');
 const path    = require('path');
 const express = require('express');
 const { WebSocketServer, OPEN } = require('ws');
 const { BASE_SETTINGS, ModeManager } = require('./modes');
 const {
+  CONFIG_IDS,
   CONTROL_LIMITS,
   THROTTLE_TAKEOFF_THRESHOLD,
   altitudeLimitMillimeters,
   encodePcmd,
   limitGazAtAltitude,
+  parseConfigValue,
+  queueConfigIds,
   setDroneAxes
 } = require('./control');
 
@@ -44,10 +48,12 @@ function broadcast(wss, obj) {
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let altitudeCurrent = 0;
+let lastPcmdGaz = 0;
 let batteryPct      = null;
 let isFlying        = false;
-let maxAlt          = 10.0;     // metres; outdoor operation still needs local/legal limits
+let maxAlt          = 5.0;      // metres; firmware altitude_max supports approximately 0.5–5 m
 let emergencyActive = false;
+let droneStateFlags = {};
 let actualSpeed     = 0;
 let activeMode      = 'manual';
 let safetyEnabled   = true;
@@ -93,6 +99,8 @@ function createMockDrone() {
     : 87;
   let simGaz     = 0;
   let mockPcmdSequence = 1;
+  let mockConfigSequence = 1;
+  let mockRefSequence = 1;
 
   const navInterval = setInterval(() => {
     if (simFlying) simAlt = Math.max(0, simAlt + simGaz * 0.05);
@@ -103,13 +111,16 @@ function createMockDrone() {
   }, 100);
 
   const drone = {
-    takeoff()          { simFlying = true;  console.log('[MOCK] takeoff'); },
+    takeoff()          {
+      simFlying = true;
+      console.log(`[AT*REF MOCK] AT*REF=${mockRefSequence++},512\\r`);
+    },
     land()             { simFlying = false; simAlt = 0; console.log('[MOCK] land'); },
     stop()             { simGaz = 0; console.log('[MOCK] stop'); },
     up(v)              { simGaz =  v; console.log(`[MOCK] up(${v.toFixed(3)})`); },
     down(v)            { simGaz = -v; console.log(`[MOCK] down(${v.toFixed(3)})`); },
     logPcmd(axes) {
-      console.log(`[AT*PCMD MOCK] ${encodePcmd(mockPcmdSequence++, axes)}`);
+      console.log(`[AT*PCMD MOCK] ${encodePcmd(mockPcmdSequence++, axes)}\\r`);
     },
     front(v)           { console.log(`[MOCK] front(${v.toFixed(3)})`); },
     back(v)            { console.log(`[MOCK] back(${v.toFixed(3)})`); },
@@ -120,7 +131,10 @@ function createMockDrone() {
     disableEmergency() { console.log('[MOCK] disableEmergency'); },
     ftrim()            { console.log('[MOCK] ftrim'); },
     config(k, v, cb)   {
-      console.log(`[MOCK] config(${k}, ${v})`);
+      const ids = `AT*CONFIG_IDS=${mockConfigSequence++},"${CONFIG_IDS.session}","${CONFIG_IDS.user}","${CONFIG_IDS.app}"`;
+      const config = `AT*CONFIG=${mockConfigSequence++},"${k}","${v}"`;
+      console.log(`[AT*CONFIG MOCK] ${ids}\\r`);
+      console.log(`[AT*CONFIG MOCK] ${config}\\r`);
       if (cb) setImmediate(() => cb(null));
     },
     getPngStream() {
@@ -162,10 +176,14 @@ function createRealDrone() {
     if (Buffer.isBuffer(data)) {
       const payload = data.toString('ascii', offset, offset + length);
       for (const command of payload.split('\r')) {
-        if (!command.startsWith('AT*PCMD=')) continue;
-        const fields = command.split(',');
-        if (fields.slice(2).some((field) => field !== '0')) {
-          console.log(`[AT*PCMD] ${command}`);
+        if (command.startsWith('AT*CONFIG=') || command.startsWith('AT*CONFIG_IDS=')) {
+          console.log(`[AT] ${command}\\r`);
+        } else if (command.startsWith('AT*PCMD=')) {
+          const fields = command.split(',');
+          if (fields.slice(2).every((field) => field === '0')) continue;
+          console.log(`[AT*PCMD] ${command}\\r`);
+        } else if (command.startsWith('AT*REF=')) {
+          console.log(`[AT] ${command}\\r`);
         }
       }
     }
@@ -186,6 +204,7 @@ function applyMove(drone, pitch, roll, yaw, gaz) {
     console.log(`[MOVE] alt guard: gaz ${gaz.toFixed(3)} → ${guardedGaz.toFixed(3)} (alt=${altitudeCurrent.toFixed(2)}m limit=${maxAlt.toFixed(2)}m)`);
   }
   gaz = guardedGaz;
+  lastPcmdGaz = gaz;
 
   setDroneAxes(drone, { pitch, roll, yaw, gaz });
 
@@ -211,47 +230,110 @@ function resetWatchdog(drone) {
   }, 1000);
 }
 
-// ─── Firmware altitude config ─────────────────────────────────────────────────
-function applyAltitudeConfig(drone, callback) {
-  const mm = altitudeLimitMillimeters(maxAlt);
-  console.log(`[CFG] altitude_max → ${mm} mm (${maxAlt} m)`);
+// ─── Firmware configuration ────────────────────────────────────────────────────
+function sendConfigWithRetry(drone, key, value, callback, attempt = 1) {
   try {
-    drone.config('control:altitude_max', mm, (err) => {
-      if (err) {
-        console.warn('[CFG] altitude_max was not acknowledged:', err.message || err);
-      } else {
-        console.log(`[CFG] altitude_max acknowledged (${mm} mm)`);
+    if (!MOCK_MODE) queueConfigIds(drone);
+    drone.config(key, value, (err) => {
+      if (err && attempt < 3) {
+        console.warn(`[CFG] ${key} not acknowledged (attempt ${attempt}); resending`);
+        sendConfigWithRetry(drone, key, value, callback, attempt + 1);
+        return;
       }
-      if (callback) callback(err || null);
+      callback(err || null);
     });
   } catch (err) {
-    console.error('[CFG] altitude_max failed:', err.message || err);
-    if (callback) callback(err);
+    if (attempt < 3) {
+      console.warn(`[CFG] ${key} send failed (attempt ${attempt}); resending:`, err.message || err);
+      sendConfigWithRetry(drone, key, value, callback, attempt + 1);
+      return;
+    }
+    callback(err);
   }
 }
 
-function applyFlightConfig(drone) {
+function applyAltitudeConfig(drone, callback) {
+  const mm = altitudeLimitMillimeters(maxAlt);
+  console.log(`[CFG] altitude_max → ${mm} mm (${maxAlt} m)`);
+  sendConfigWithRetry(drone, 'control:altitude_max', mm, (err) => {
+    if (err) console.error('[CFG] altitude_max was not acknowledged after retries:', err.message || err);
+    else console.log(`[CFG] altitude_max acknowledged (${mm} mm)`);
+    if (callback) callback(err || null);
+  });
+}
+
+function readDroneConfig(drone) {
+  if (MOCK_MODE) return;
+  const keys = [
+    'control:altitude_max',
+    'control:control_vz_max',
+    'control:euler_angle_max',
+    'control:outdoor'
+  ];
+  const socket = net.createConnection({ host: DRONE_IP, port: 5559 });
+  let response = '';
+  let finished = false;
+  let idleTimer = null;
+  const finish = (error) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(idleTimer);
+    if (error) {
+      console.warn('[CFG READBACK] failed:', error.message || error);
+    } else {
+      console.log('[CFG READBACK] values reported by drone:');
+      for (const key of keys) {
+        const value = parseConfigValue(response, key);
+        console.log(`[CFG READBACK] ${key}=${value === null ? 'NOT PRESENT' : value}`);
+      }
+    }
+    socket.destroy();
+  };
+  socket.setTimeout(3000, () => finish(new Error('TCP 5559 readback timed out')));
+  socket.on('connect', () => {
+    console.log('[CFG READBACK] TCP 5559 connected; requesting configuration with AT*CTRL=4,0');
+    try {
+      drone.ctrl(4, 0);
+    } catch (err) {
+      finish(err);
+    }
+  });
+  socket.on('data', (chunk) => {
+    response += chunk.toString('ascii');
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => finish(), 300);
+  });
+  socket.on('end', () => finish());
+  socket.on('error', (err) => finish(err));
+}
+
+function applyFlightConfig(drone, onComplete) {
   const settings = [
     ['control:altitude_max', altitudeLimitMillimeters(maxAlt), 'altitude_max'],
     ['control:outdoor', BASE_SETTINGS['control:outdoor'], 'outdoor'],
-    ['control:indoor_control_vz_max', String(CONTROL_LIMITS.verticalSpeedMmPerSecond), 'indoor_control_vz_max'],
-    ['control:indoor_control_yaw', String(CONTROL_LIMITS.yawRateRadiansPerSecond), 'indoor_control_yaw']
+    ['control:euler_angle_max', BASE_SETTINGS['control:euler_angle_max'], 'euler_angle_max'],
+    ['control:control_vz_max', String(CONTROL_LIMITS.verticalSpeedMmPerSecond), 'control_vz_max'],
+    ['control:control_yaw', String(CONTROL_LIMITS.yawRateRadiansPerSecond), 'control_yaw'],
+    ['control:indoor_euler_angle_max', BASE_SETTINGS['control:indoor_euler_angle_max'], 'indoor_euler_angle_max'],
+    ['control:indoor_control_vz_max', BASE_SETTINGS['control:indoor_control_vz_max'], 'indoor_control_vz_max'],
+    ['control:indoor_control_yaw', BASE_SETTINGS['control:indoor_control_yaw'], 'indoor_control_yaw'],
+    ['control:outdoor_euler_angle_max', BASE_SETTINGS['control:outdoor_euler_angle_max'], 'outdoor_euler_angle_max'],
+    ['control:outdoor_control_vz_max', BASE_SETTINGS['control:outdoor_control_vz_max'], 'outdoor_control_vz_max'],
+    ['control:outdoor_control_yaw', BASE_SETTINGS['control:outdoor_control_yaw'], 'outdoor_control_yaw']
   ];
 
   function applyNext(index) {
-    if (index >= settings.length) return;
+    if (index >= settings.length) {
+      if (onComplete) onComplete();
+      return;
+    }
     const [key, value, label] = settings[index];
     console.log(`[CFG] ${label} → ${value}${label === 'altitude_max' ? ' mm' : ''}`);
-    try {
-      drone.config(key, value, (err) => {
-        if (err) console.warn(`[CFG] ${label} was not acknowledged:`, err.message || err);
-        else console.log(`[CFG] ${label} acknowledged (${value})`);
-        applyNext(index + 1);
-      });
-    } catch (err) {
-      console.error(`[CFG] ${label} failed:`, err.message || err);
+    sendConfigWithRetry(drone, key, value, (err) => {
+      if (err) console.error(`[CFG] ${label} was not acknowledged after retries:`, err.message || err);
+      else console.log(`[CFG] ${label} acknowledged (${value})`);
       applyNext(index + 1);
-    }
+    });
   }
   applyNext(0);
 }
@@ -277,10 +359,37 @@ async function main() {
   let directorTimer = null;
   let directorRun = null;
   let lastSafetyNavdataTime = 0;
+  let hasSeenNavdata = false;
   let lastMotorTestResult = 'not tested';
   const modeManager = new ModeManager(BASE_SETTINGS);
   let modeTransition = Promise.resolve();
   let modeTransitionCount = 0;
+  let commandAckSeen = null;
+
+  function getFlightLimits() {
+    const outdoor = modeManager.settings['control:outdoor'] === 'TRUE';
+    const hullPrefix = outdoor ? 'outdoor' : 'indoor';
+    const configuredVerticalSpeed =
+      modeManager.settings[`control:${hullPrefix}_control_vz_max`] ||
+      modeManager.settings['control:control_vz_max'];
+    const configuredTilt =
+      modeManager.settings[`control:${hullPrefix}_euler_angle_max`] ||
+      modeManager.settings['control:euler_angle_max'];
+    const telemetryIsFresh = hasRecentNavdata();
+    return {
+      altitudeRawMm: telemetryIsFresh ? Math.round(altitudeCurrent * 1000) : null,
+      altitudeMeters: telemetryIsFresh ? altitudeCurrent : null,
+      limitMm: Number(modeManager.settings['control:altitude_max']),
+      limitMeters: maxAlt,
+      verticalSpeedMmPerSecond: Number(configuredVerticalSpeed),
+      tiltRadians: Number(configuredTilt),
+      mode: activeMode,
+      batteryPct: telemetryIsFresh && typeof batteryPct === 'number' ? batteryPct : null,
+      lastPcmdGaz,
+      commandAck: commandAckSeen,
+      droneState: droneStateFlags
+    };
+  }
 
   wss.on('error', (err) => {
     console.error('[SRV] HTTP/WebSocket server error:', err.message || err);
@@ -303,6 +412,8 @@ async function main() {
       battery: batteryPct,
       flying: isFlying,
       maxAlt,
+      flightLimits: getFlightLimits(),
+      droneState: droneStateFlags,
       videoFps,
       mode: activeMode,
       safety: { enabled: safetyEnabled, batteryThreshold: safetyBatteryThreshold },
@@ -331,6 +442,8 @@ async function main() {
       battery: typeof batteryPct === 'number' ? Math.round(batteryPct) : null,
       flying: isFlying,
       maxAlt,
+      flightLimits: getFlightLimits(),
+      droneState: droneStateFlags,
       clients: clientCount,
       navdataAge: lastNavdataTime ? Date.now() - lastNavdataTime : null,
       videoFps,
@@ -428,6 +541,7 @@ async function main() {
     takeoffSource = source;
     const requestId = ++takeoffRequestId;
     console.log(`[CMD] ${source} takeoff requested`);
+    console.log(`[TAKEOFF] before command: state flags=${JSON.stringify(droneStateFlags)} battery=${batteryPct === null ? 'N/A' : `${Math.round(batteryPct)}%`}`);
     applyAltitudeConfig(drone, (err) => {
       if (requestId !== takeoffRequestId) return;
       takeoffPending = false;
@@ -447,6 +561,7 @@ async function main() {
       drone.takeoff();
       takeoffCommandSent = true;
       console.log(`[CMD] → drone: takeoff() via ${source}`);
+      console.log(`[TAKEOFF] AT*REF requested; current state flags=${JSON.stringify(droneStateFlags)} battery=${batteryPct === null ? 'N/A' : `${Math.round(batteryPct)}%`}`);
       if (pendingMove) {
         const axes = pendingMove;
         pendingMove = null;
@@ -481,9 +596,9 @@ async function main() {
   const drone = MOCK_MODE ? createMockDrone() : createRealDrone();
 
   drone.disableEmergency();
-  applyFlightConfig(drone);
+  applyFlightConfig(drone, () => readDroneConfig(drone));
   const applyModeConfig = (key, value) => new Promise((resolve, reject) => {
-    drone.config(key, value, (err) => {
+    sendConfigWithRetry(drone, key, value, (err) => {
       if (err) reject(err);
       else resolve();
     });
@@ -561,15 +676,32 @@ async function main() {
     console.error('[DRONE] client error:', err.message || err);
   });
   drone.on('navdata', (data) => {
+    const navdataRecovered = hasSeenNavdata && Date.now() - lastNavdataTime > 2000;
+    hasSeenNavdata = true;
     navdataCount++;
     lastNavdataTime = Date.now();
+    if (navdataRecovered) {
+      console.warn('[CFG] navdata recovered after a connection gap; reapplying flight configuration');
+      applyFlightConfig(drone, () => readDroneConfig(drone));
+    }
     lastSafetyNavdataTime = lastNavdataTime;
     const demo  = data.demo || {};
     const state = data.droneState || {};
-    altitudeCurrent = typeof demo.altitude === 'number' ? demo.altitude : altitudeCurrent;
+    const previousFlying = isFlying;
+    const parsedAltitude = typeof demo.altitudeMeters === 'number'
+      ? demo.altitudeMeters
+      : demo.altitude;
+    altitudeCurrent = typeof parsedAltitude === 'number' ? parsedAltitude : altitudeCurrent;
     batteryPct = typeof demo.batteryPercentage === 'number' ? demo.batteryPercentage : batteryPct;
     isFlying = !!state.flying;
+    droneStateFlags = { ...state };
+    if (typeof state.controlCommandAck === 'number' || typeof state.controlCommandAck === 'boolean') {
+      commandAckSeen = !!state.controlCommandAck;
+    }
     emergencyActive = !!(state.emergency || state.emergencyLanding || state.emergencyLanding === 1);
+    if (!previousFlying && isFlying) {
+      console.log(`[TAKEOFF] flying confirmed; state flags=${JSON.stringify(state)} battery=${batteryPct === null ? 'N/A' : `${Math.round(batteryPct)}%`}`);
+    }
     if (safetyEnabled && typeof batteryPct === 'number') {
       if (batteryPct <= safetyBatteryThreshold && isFlying) {
         safetyLand(`battery ${Math.round(batteryPct)}% reached ${safetyBatteryThreshold}% threshold`);
@@ -591,6 +723,8 @@ async function main() {
       battery : typeof batteryPct === 'number' ? Math.round(batteryPct) : null,
       flying  : isFlying,
       maxAlt,
+      flightLimits: getFlightLimits(),
+      droneState: droneStateFlags,
       clients: clientCount,
       navdataAge: lastNavdataTime ? Date.now() - lastNavdataTime : null,
       videoFps,
@@ -683,6 +817,8 @@ async function main() {
       battery: batteryPct,
       flying: isFlying,
       maxAlt,
+      flightLimits: getFlightLimits(),
+      droneState: droneStateFlags,
       clients: clientCount,
       navdataAge: lastNavdataTime ? Date.now() - lastNavdataTime : null,
       videoFps,
@@ -963,7 +1099,7 @@ async function main() {
 
         case 'limit': {
           if (typeof msg.value !== 'number' || !isFinite(msg.value)) break;
-          maxAlt = clamp(msg.value, 0.5, 10.0);
+          maxAlt = clamp(msg.value, 0.5, 5.0);
           modeManager.settings['control:altitude_max'] = altitudeLimitMillimeters(maxAlt);
           if (altitudeConfigTimer) clearTimeout(altitudeConfigTimer);
           altitudeConfigTimer = setTimeout(() => {
@@ -976,6 +1112,8 @@ async function main() {
             battery: batteryPct,
             flying: isFlying,
             maxAlt,
+            flightLimits: getFlightLimits(),
+            droneState: droneStateFlags,
             mock: MOCK_MODE,
             navdata: hasRecentNavdata()
           });

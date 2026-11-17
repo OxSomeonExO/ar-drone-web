@@ -107,7 +107,7 @@ Override defaults with environment variables:
 | **LAND** button (red) | Land immediately |
 | **📷 Photo** | Save a PNG screenshot |
 | **⏺ Record** | Start/stop video recording |
-| **⚙ Settings** | Height limit (0.5–10 m), speed, hull, flat trim, emergency reset |
+| **⚙ Settings** | Height limit (0.5–5 m), speed, hull, flat trim, emergency reset |
 | **Modes** | Manual, Training, Indoor, Outdoor, Tilt, Director, Race, and Safety |
 
 The Take off button remains available; alternatively, deliberately hold the
@@ -115,13 +115,20 @@ left stick UP for 0.35 seconds to initiate takeoff, then use its vertical axis
 to climb or descend. Speed defaults to **30%** — keep it low until you are
 comfortable.
 The live server configures the firmware's vertical speed limit to **700 mm/s**
-and yaw rate to **3 rad/s** at startup. The height setting is entered in metres,
+and yaw rate to **3 rad/s** at startup. Each `AT*CONFIG` is preceded by
+`AT*CONFIG_IDS`, retried when the navdata command-acknowledged bit is not seen,
+and re-applied after a navdata reconnect. Height is entered in metres,
 converted to millimetres for firmware, and enforced in metres against the
-`ar-drone` navdata altitude. Both joysticks are transparent overlays over the
-full-screen camera view; the server continuously forwards the latest four axes
-and logs nonzero AT*PCMD packets for diagnosis. Each movement axis is sent with
-only one directional `ar-drone` setter because calling the opposite setter
-with zero clears the requested axis in that package.
+`ar-drone` navdata altitude. The firmware-supported height range is about
+0.5–5 m, so the app caps the slider at 5 m. Settings shows a live Flight limits
+diagnostic with raw/mm and converted/metre altitude, active firmware limits,
+mode, battery, and the last gaz command. In live mode the server requests and
+prints selected values from the drone's TCP 5559 configuration response.
+Both joysticks are transparent overlays over the full-screen camera view; the
+server continuously forwards the latest four axes and logs actual nonzero
+AT*PCMD packets for diagnosis. Each movement axis is sent with only one
+directional `ar-drone` setter because calling the opposite setter with zero
+clears the requested axis in that package.
 
 Mode presets can be selected only while landed (Safety remains an independent
 toggle). Training caps movement to 15% and limits height to 1.5 m; Indoor and

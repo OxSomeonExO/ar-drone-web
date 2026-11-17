@@ -4,6 +4,11 @@ const CONTROL_LIMITS = Object.freeze({
   verticalSpeedMmPerSecond: 700,
   yawRateRadiansPerSecond: 3.0
 });
+const CONFIG_IDS = Object.freeze({
+  session: 'd2e081a3',
+  user: 'e4b372c3',
+  app: 'd2e081a3'
+});
 const THROTTLE_TAKEOFF_THRESHOLD = 0.05;
 
 function floatToAtInt32(value) {
@@ -45,12 +50,37 @@ function altitudeLimitMillimeters(limitMeters) {
   return String(Math.round(limitMeters * 1000));
 }
 
+function altitudeMillimetersToMeters(altitudeMillimeters) {
+  return altitudeMillimeters / 1000;
+}
+
+function parseConfigValue(configText, key) {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = configText.match(new RegExp(`(?:^|[\\r\\n])\\s*${escapedKey}\\s*=\\s*"?([^"\\r\\n]*)"?`, 'm'));
+  return match ? match[1].trim() : null;
+}
+
+function queueConfigIds(drone) {
+  const control = drone && drone._udpControl;
+  if (!control || !Array.isArray(control._cmds) ||
+      !control._cmdCreator || typeof control._cmdCreator.raw !== 'function') {
+    throw new Error('Cannot send AT*CONFIG_IDS: ar-drone UDP control queue is unavailable.');
+  }
+  const ids = [CONFIG_IDS.session, CONFIG_IDS.user, CONFIG_IDS.app]
+    .map((id) => `"${id}"`);
+  control._cmds.push(control._cmdCreator.raw('CONFIG_IDS', ids));
+}
+
 module.exports = {
+  CONFIG_IDS,
   CONTROL_LIMITS,
   THROTTLE_TAKEOFF_THRESHOLD,
   altitudeLimitMillimeters,
+  altitudeMillimetersToMeters,
   encodePcmd,
   floatToAtInt32,
   limitGazAtAltitude,
+  parseConfigValue,
+  queueConfigIds,
   setDroneAxes
 };

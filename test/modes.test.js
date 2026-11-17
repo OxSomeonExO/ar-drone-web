@@ -12,18 +12,21 @@ async function main() {
     onRestoreError: (_key, error) => { throw error; }
   };
 
-  assert.strictEqual(BASE_SETTINGS['control:altitude_max'], '10000');
+  assert.strictEqual(BASE_SETTINGS['control:altitude_max'], '5000');
+  assert.strictEqual(BASE_SETTINGS['control:control_vz_max'], '700');
   await manager.enter('training', context);
   assert.strictEqual(manager.current.id, 'training');
   assert.strictEqual(manager.settings['control:altitude_max'], '1500');
+  assert.strictEqual(manager.settings['control:control_vz_max'], '300');
   assert.strictEqual(manager.current.preset['control:indoor_control_vz_max'], '300');
 
   await manager.enter('manual', context);
   assert.strictEqual(manager.current.id, 'manual');
-  assert.strictEqual(manager.settings['control:altitude_max'], '10000');
+  assert.strictEqual(manager.settings['control:altitude_max'], '5000');
+  assert.strictEqual(manager.settings['control:control_vz_max'], '700');
   assert.strictEqual(manager.settings['control:indoor_control_vz_max'], '700');
   assert.ok(applied.some(([key, value]) => key === 'control:altitude_max' && value === '1500'));
-  assert.ok(applied.some(([key, value]) => key === 'control:altitude_max' && value === '10000'));
+  assert.ok(applied.some(([key, value]) => key === 'control:altitude_max' && value === '5000'));
 
   const beforeFlyingSwitch = applied.length;
   await assert.rejects(
