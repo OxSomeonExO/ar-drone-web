@@ -1,0 +1,1414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>AR.Drone Controller</title>
+<style>
+/* ── Reset & base ─────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #0e1418;
+  --glass:    rgba(255,255,255,0.07);
+  --orange:   #ff7a1a;
+  --green:    #22c55e;
+  --red:      #ef4444;
+  --text:     #e2e8f0;
+  --dim:      #94a3b8;
+  --warn:     #fbbf24;
+  --radius:   12px;
+  --safe-t:   env(safe-area-inset-top,    0px);
+  --safe-b:   env(safe-area-inset-bottom, 0px);
+  --safe-l:   env(safe-area-inset-left,   0px);
+  --safe-r:   env(safe-area-inset-right,  0px);
+}
+
+html, body {
+  width:100%; height:100%; overflow:hidden;
+  background:var(--bg); color:var(--text);
+  font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;
+  touch-action:none;
+  -webkit-user-select:none; user-select:none;
+}
+
+/* ── App grid ─────────────────────────────────────────────── */
+#app {
+  position:fixed; inset:0;
+  z-index:1; pointer-events:none;
+  display:grid;
+  grid-template-rows: auto 1fr auto;
+  padding:
+    calc(var(--safe-t) + 4px)
+    calc(var(--safe-r) + 4px)
+    calc(var(--safe-b) + 4px)
+    calc(var(--safe-l) + 4px);
+  gap:4px;
+}
+
+/* ── Top bar ──────────────────────────────────────────────── */
+#topbar {
+  position:relative; z-index:2;
+  pointer-events:auto;
+  display:flex; align-items:center; gap:10px;
+  padding:6px 12px;
+  background:var(--glass); border-radius:var(--radius);
+  font-size:13px; line-height:1; overflow:hidden;
+}
+#conn-dot {
+  width:10px; height:10px; border-radius:50%;
+  background:var(--red); flex-shrink:0; transition:background .3s;
+}
+#conn-dot.ok  { background:var(--green); }
+#conn-dot.mid { background:var(--warn);  }
+#fly-badge {
+  font-size:11px; font-weight:700; letter-spacing:.06em;
+  padding:2px 7px; border-radius:20px;
+  background:rgba(239,68,68,.2); color:var(--red); display:none;
+}
+#fly-badge.on {
+  display:inline-block;
+  background:rgba(34,197,94,.2); color:var(--green);
+}
+#alt-display {
+  margin-left:auto; font-size:14px; font-weight:600; letter-spacing:.02em;
+}
+#alt-display.near-limit { color:var(--warn); }
+#bat-display { font-weight:600; }
+
+/* ── Middle ───────────────────────────────────────────────── */
+#middle {
+  position:relative; display:grid;
+  pointer-events:none;
+  grid-template-columns: minmax(0,1fr) minmax(0,1fr) minmax(0,1fr);
+  grid-template-rows:1fr; gap:4px; overflow:visible;
+}
+
+/* ── Video ────────────────────────────────────────────────── */
+#video-wrap {
+  position:fixed; inset:0; z-index:0; display:flex;
+  align-items:center; justify-content:center;
+  background:#000; overflow:hidden; pointer-events:none;
+}
+#video-canvas {
+  position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+}
+#video-placeholder {
+  position:absolute; display:flex; flex-direction:column;
+  align-items:center; gap:8px; color:var(--dim); font-size:13px;
+  pointer-events:none;
+}
+#video-placeholder svg { width:48px; height:48px; stroke:var(--dim); fill:none; }
+
+/* ── Joystick ─────────────────────────────────────────────── */
+.stick-zone {
+  position:relative; display:flex;
+  align-items:center; justify-content:center;
+  touch-action:none; cursor:none; pointer-events:none;
+}
+#stick-left  { grid-column:1; }
+#stick-right { grid-column:3; }
+.stick-base {
+  position:relative;
+  width:min(220px, calc(100vh - 130px), calc(50vw - 16px));
+  height:min(220px, calc(100vh - 130px), calc(50vw - 16px));
+  width:min(220px, calc(100dvh - 130px), calc(50vw - 16px));
+  height:min(220px, calc(100dvh - 130px), calc(50vw - 16px));
+  border-radius:50%; background:rgba(240,248,255,.5);
+  border:2px solid rgba(255,255,255,.9); flex-shrink:0;
+  z-index:2; pointer-events:auto; touch-action:none;
+  box-shadow:0 0 12px rgba(0,0,0,.35), inset 0 0 10px rgba(0,0,0,.18);
+}
+.stick-base::before, .stick-base::after {
+  content:""; position:absolute; pointer-events:none;
+  background:rgba(255,255,255,.5);
+}
+.stick-base::before { left:8%; right:8%; top:50%; height:1px; }
+.stick-base::after { top:8%; bottom:8%; left:50%; width:1px; }
+.stick-base > * { pointer-events:none; }
+.stick-base > .stick-knob { pointer-events:none; }
+.stick-base > .stick-label { pointer-events:none; }
+.stick-base > .stick-axis-label { pointer-events:none; }
+.stick-base > .stick-axis-label {
+  color:rgba(255,255,255,.82);
+  text-shadow:0 1px 3px rgba(0,0,0,.8);
+}
+.stick-label {
+  position:absolute; top:-28px; left:50%; transform:translateX(-50%);
+  font-size:9px; line-height:1.15; text-align:center;
+  color:#fff; white-space:nowrap; letter-spacing:.05em;
+  text-shadow:0 1px 3px rgba(0,0,0,.9);
+}
+.stick-knob {
+  position:absolute; width:40%; height:40%; border-radius:50%;
+  background:rgba(255,255,255,.5);
+  border:2px solid rgba(255,255,255,.95);
+  box-shadow:0 0 16px rgba(0,0,0,.35);
+  top:50%; left:50%; transform:translate(-50%,-50%);
+  transition:background .15s, box-shadow .15s; pointer-events:none;
+}
+.stick-knob.active {
+  background:rgba(255,255,255,.82);
+  box-shadow:0 0 24px rgba(0,0,0,.5);
+}
+.stick-axis-label {
+  position:absolute; font-size:9px; color:rgba(255,255,255,.82);
+  letter-spacing:.04em; pointer-events:none;
+}
+.stick-axis-label.top    { top:2px;    left:50%; transform:translateX(-50%); }
+.stick-axis-label.bottom { bottom:2px; left:50%; transform:translateX(-50%); }
+.stick-axis-label.left   { left:2px;   top:50%;  transform:translateY(-50%); }
+.stick-axis-label.right  { right:2px;  top:50%;  transform:translateY(-50%); }
+
+/* ── Bottom bar ───────────────────────────────────────────── */
+#bottombar {
+  position:relative; z-index:2;
+  pointer-events:auto;
+  display:flex; align-items:center; justify-content:space-between;
+  gap:6px; padding:6px 8px;
+  background:var(--glass); border-radius:var(--radius);
+}
+.btn {
+  display:flex; align-items:center; justify-content:center; gap:5px;
+  font-size:13px; font-weight:600; letter-spacing:.03em;
+  padding:10px 16px; border:none; border-radius:10px;
+  cursor:pointer; min-height:44px; min-width:44px;
+  touch-action:manipulation; color:#fff;
+  transition:filter .1s, transform .08s;
+}
+.btn:active { filter:brightness(.8); transform:scale(.96); }
+@media (prefers-reduced-motion:reduce) { .btn { transition:none; } }
+.btn-takeoff  { background:var(--green); flex:1; }
+.btn-land     { background:var(--red);   flex:1.4; font-size:15px; }
+.btn-photo    { background:rgba(255,255,255,.12); }
+.btn-record   { background:rgba(255,255,255,.12); }
+.btn-record.recording { background:var(--red); }
+.btn-settings { background:rgba(255,255,255,.08); }
+#rec-timer    { font-size:11px; }
+#mode-badge {
+  border:1px solid rgba(255,255,255,.35); border-radius:999px;
+  padding:4px 8px; color:#fff; font-size:10px; white-space:nowrap;
+}
+#mode-panel {
+  display:none; position:fixed; inset:0; z-index:400;
+  background:rgba(0,0,0,.76); padding:calc(var(--safe-t) + 10px) 10px calc(var(--safe-b) + 10px);
+  align-items:center; justify-content:center; pointer-events:auto;
+}
+#mode-panel.open { display:flex; }
+#mode-box {
+  width:min(600px,100%); max-height:100%; overflow:auto;
+  background:#151c24; color:var(--text); border:1px solid rgba(255,255,255,.2);
+  border-radius:18px; padding:16px; display:flex; flex-direction:column; gap:12px;
+}
+#mode-heading { display:flex; align-items:center; justify-content:space-between; }
+#mode-heading h2 { font-size:18px; }
+#mode-close { color:#fff; background:transparent; border:0; font-size:24px; padding:4px 10px; }
+#mode-land { color:#fff; background:var(--red); border:0; border-radius:9px; padding:10px 12px; font-weight:800; }
+#mode-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.mode-choice,.mode-action {
+  min-height:44px; padding:9px 10px; border-radius:10px; color:#fff;
+  border:1px solid rgba(255,255,255,.2); background:rgba(255,255,255,.08);
+  text-align:left; font-size:13px;
+}
+.mode-choice:disabled { opacity:.45; }
+#mode-detail { white-space:pre-wrap; font-size:12px; color:#d5dde7; line-height:1.45; }
+#mode-tools { display:flex; flex-direction:column; gap:10px; }
+#motor-diagram { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.motor-button { border:1px solid #fff; background:rgba(255,255,255,.1); color:#fff; border-radius:10px; padding:10px; min-height:44px; }
+#motor-safety { font-size:14px; font-weight:800; color:#ffdd75; }
+.motor-dialog-backdrop {
+  display:none; position:fixed; inset:0; z-index:500; background:rgba(0,0,0,.82);
+  align-items:center; justify-content:center; padding:20px; pointer-events:auto;
+}
+.motor-dialog-backdrop.open { display:flex; }
+.motor-dialog {
+  width:min(460px,100%); background:#151c24; color:#fff; border:2px solid #ffbd3e;
+  border-radius:16px; padding:22px; display:flex; flex-direction:column; gap:16px;
+}
+.motor-dialog h2 { font-size:clamp(24px,5vw,36px); line-height:1.05; color:#ffcf65; }
+.motor-dialog label { display:flex; align-items:center; gap:10px; font-size:15px; }
+.mode-controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.mode-controls input[type=range] { min-width:120px; flex:1; }
+#director-progress { width:100%; accent-color:var(--orange); }
+#tilt-hold {
+  display:none; position:fixed; right:calc(var(--safe-r) + 10px); top:50%;
+  transform:translateY(-50%); z-index:3; pointer-events:auto;
+}
+body.tilt-mode #stick-right { visibility:hidden; }
+body.tilt-mode #tilt-hold { display:block; }
+
+/* ── Settings panel ───────────────────────────────────────── */
+#settings-panel {
+  display:none; position:fixed; inset:0; z-index:100;
+  background:rgba(0,0,0,.6); align-items:flex-end; justify-content:center;
+  padding:calc(var(--safe-b)+4px) 8px 8px;
+}
+#settings-panel.open { display:flex; }
+#settings-box {
+  background:#1a2028; border-radius:20px 20px 12px 12px;
+  padding:20px 20px 24px; width:100%; max-width:420px;
+  display:flex; flex-direction:column; gap:16px;
+  border:1px solid rgba(255,255,255,.1);
+  max-height:85vh; overflow-y:auto;
+}
+#settings-box h2 {
+  font-size:16px; font-weight:700; letter-spacing:.04em; color:var(--text);
+  display:flex; align-items:center; justify-content:space-between;
+}
+#settings-close {
+  background:none; border:none; color:var(--dim); font-size:20px;
+  cursor:pointer; padding:4px;
+}
+.setting-row { display:flex; flex-direction:column; gap:6px; }
+.setting-row label {
+  font-size:12px; color:var(--dim); letter-spacing:.05em;
+  display:flex; justify-content:space-between;
+}
+.setting-row label span { color:var(--text); font-weight:600; }
+input[type=range] {
+  -webkit-appearance:none; width:100%; height:6px;
+  border-radius:3px; background:rgba(255,255,255,.15); outline:none;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance:none; width:22px; height:22px; border-radius:50%;
+  background:var(--orange); cursor:pointer; border:2px solid #fff;
+}
+input[type=range]::-moz-range-thumb {
+  width:22px; height:22px; border-radius:50%;
+  background:var(--orange); cursor:pointer; border:2px solid #fff;
+}
+.btn-action {
+  background:rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.15);
+  border-radius:10px; color:var(--text); font-size:13px; font-weight:600;
+  padding:12px; cursor:pointer; min-height:44px; touch-action:manipulation;
+}
+.btn-action:active { filter:brightness(.8); }
+.btn-action.danger {
+  background:rgba(239,68,68,.15); border-color:rgba(239,68,68,.3); color:#fca5a5;
+}
+
+/* ── Flash overlay ────────────────────────────────────────── */
+#flash {
+  position:fixed; inset:0; background:#fff; opacity:0;
+  pointer-events:none; z-index:200; transition:opacity 0s;
+}
+#flash.flash-on  { opacity:.8; transition:opacity 0s; }
+#flash.flash-off { opacity:0;  transition:opacity .4s ease; }
+
+/* ── Debug overlay ────────────────────────────────────────── */
+#dbg {
+  display:none; position:fixed; top:0; right:0; z-index:300;
+  background:rgba(0,0,0,.85); color:#0f0; font:12px/1.5 monospace;
+  padding:8px 10px; max-width:280px; border-radius:0 0 0 10px;
+  pointer-events:none;
+}
+#dbg.on { display:block; }
+
+/* ── Portrait ─────────────────────────────────────────────── */
+@media (orientation:portrait) {
+  #middle {
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    grid-template-rows:minmax(0,1fr) minmax(130px,160px);
+  }
+  .stick-base {
+    width:min(220px, calc(100dvh - 130px), calc(50vw - 16px), 160px);
+    height:min(220px, calc(100dvh - 130px), calc(50vw - 16px), 160px);
+  }
+  #stick-left  { grid-column:1; grid-row:2; }
+  #stick-right { display:flex; grid-column:2; grid-row:2; }
+  #portrait-sticks { display:none !important; }
+}
+#portrait-sticks { display:none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- Top bar -->
+  <div id="topbar">
+    <div id="conn-dot"></div>
+    <span id="conn-label" style="font-size:12px;color:var(--dim)">Connecting…</span>
+    <span id="fly-badge">FLYING</span>
+    <span id="mode-badge">MANUAL</span>
+    <button class="btn-action" style="padding:5px 8px;min-height:32px" onclick="openModePanel()">Modes</button>
+    <span style="margin-left:auto;display:flex;align-items:center;gap:10px;">
+      <span>🔋 <strong id="bat-display">--</strong>%</span>
+      <span style="color:var(--dim)">Alt:</span>
+      <strong id="alt-display">--/-- m</strong>
+    </span>
+    <!-- Debug toggle: tap 3 times on the connection label to show -->
+    <button id="dbg-btn" onclick="toggleDebug()"
+      style="background:none;border:none;color:var(--dim);font-size:10px;cursor:pointer;padding:2px 4px;min-height:0;">
+      DBG
+    </button>
+  </div>
+
+  <!-- Middle: left stick | video | right stick -->
+  <div id="middle">
+    <div class="stick-zone" id="stick-left">
+      <div class="stick-base" id="base-left">
+        <div class="stick-axis-label top">UP</div>
+        <div class="stick-axis-label bottom">DOWN</div>
+        <div class="stick-axis-label left">↺</div>
+        <div class="stick-axis-label right">↻</div>
+        <div class="stick-label">YAW · ALT<br>HOLD UP TO TAKE OFF</div>
+        <div class="stick-knob" id="knob-left"></div>
+      </div>
+    </div>
+
+    <div id="video-wrap">
+      <canvas id="video-canvas"></canvas>
+      <div id="video-placeholder">
+        <svg viewBox="0 0 24 24" stroke-width="1.5">
+          <path d="M15 10l4.553-2.527A1 1 0 0121 8.382v7.236a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h10a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z"/>
+        </svg>
+        <span>Waiting for drone camera…</span>
+      </div>
+    </div>
+
+    <div class="stick-zone" id="stick-right">
+      <div class="stick-base" id="base-right">
+        <div class="stick-axis-label top">FWD</div>
+        <div class="stick-axis-label bottom">BACK</div>
+        <div class="stick-axis-label left">←</div>
+        <div class="stick-axis-label right">→</div>
+        <div class="stick-label">ROLL · PITCH</div>
+        <div class="stick-knob" id="knob-right"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="portrait-sticks"></div>
+  <button id="tilt-hold" class="btn-action"
+    onpointerdown="enableTiltHold(event)" onpointerup="disableTiltHold(event)"
+    onpointercancel="disableTiltHold(event)" onpointerleave="disableTiltHold(event)">
+    Hold to control<br><small>tilt</small>
+  </button>
+
+  <!-- Bottom bar -->
+  <div id="bottombar">
+    <button class="btn btn-takeoff" id="btn-takeoff" onclick="cmdTakeoff()">🛫 Take off</button>
+    <button class="btn btn-land"    id="btn-land"    onclick="cmdLand()">🛬 LAND</button>
+    <button class="btn btn-photo"   id="btn-photo"   onclick="cmdPhoto()" title="Photo">📷</button>
+    <button class="btn btn-record"  id="btn-record"  onclick="cmdRecord()" title="Record">
+      ⏺ <span id="rec-timer"></span>
+    </button>
+    <button class="btn btn-settings" onclick="openSettings()" title="Settings">⚙</button>
+  </div>
+</div>
+
+<!-- Settings panel -->
+<div id="settings-panel" onclick="closeSettingsIfBg(event)">
+  <div id="settings-box">
+    <h2>Settings <button id="settings-close" onclick="closeSettings()">✕</button></h2>
+    <div class="setting-row">
+      <label>Height Limit <span id="limit-val">10.0 m</span></label>
+      <input type="range" id="limit-slider" min="0.5" max="10.0" step="0.1" value="10.0"
+             oninput="onLimitChange(this.value)">
+    </div>
+    <div class="setting-row">
+      <label>Speed <span id="speed-val">30%</span></label>
+      <input type="range" id="speed-slider" min="10" max="100" step="5" value="30"
+             oninput="onSpeedChange(this.value)">
+    </div>
+    <div class="setting-row">
+      <label>Hull</label>
+      <select id="hull-select" onchange="onHullChange(this.value)">
+        <option value="indoor">Indoor hull</option>
+        <option value="outdoor">Outdoor hull</option>
+      </select>
+    </div>
+    <button class="btn-action" onclick="cmdFtrim()">✈ Flat Trim (on ground only)</button>
+    <button class="btn-action danger" onclick="cmdReset()">⚠ Reset Emergency</button>
+  </div>
+</div>
+
+<div id="mode-panel" onclick="closeModeIfBg(event)">
+  <div id="mode-box">
+    <div id="mode-heading">
+      <h2>Flight modes</h2>
+      <button id="mode-land" onclick="cmdLand()">LAND NOW</button>
+      <button id="mode-close" onclick="closeModePanel()">×</button>
+    </div>
+    <div id="mode-list"></div>
+    <div id="mode-detail">Choose a mode. Except Safety, modes can only be changed while landed.</div>
+    <div id="mode-tools"></div>
+    <button class="mode-action" onclick="downloadFlightLog()">Download flight log (CSV)</button>
+  </div>
+</div>
+
+<div id="motor-confirm-overlay" class="motor-dialog-backdrop">
+  <div class="motor-dialog" role="dialog" aria-modal="true" aria-labelledby="motor-confirm-title">
+    <h2 id="motor-confirm-title">Remove all 4 propellers first</h2>
+    <label><input id="motor-confirm-removed" type="checkbox"> I confirm all four propellers are removed.</label>
+    <div class="mode-controls">
+      <button class="mode-action" onclick="confirmMotorArm()">Continue</button>
+      <button class="mode-action" onclick="closeMotorConfirm()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Flash overlay -->
+<div id="flash"></div>
+
+<!-- Debug overlay -->
+<div id="dbg">
+  <div id="dbg-content">Loading…</div>
+</div>
+
+<script>
+'use strict';
+/* ═════════════════════════════════════════════════════════════
+   AR.Drone Controller — inline JS
+   ═════════════════════════════════════════════════════════════ */
+
+// ── Debug overlay ─────────────────────────────────────────────
+let dbgOn = false;
+function toggleDebug() {
+  dbgOn = !dbgOn;
+  document.getElementById('dbg').classList.toggle('on', dbgOn);
+}
+
+const dbgState = {
+  wsState: 'CLOSED',
+  lastSent: '—',
+  lastStatus: '—',
+  videoFps: 0,
+  videoFrames: 0,
+  errors: []
+};
+let _dbgFrameCount = 0, _dbgLastFpsTime = Date.now();
+
+function dbgUpdate() {
+  if (!dbgOn) return;
+  const now = Date.now();
+  const elapsed = (now - _dbgLastFpsTime) / 1000;
+  if (elapsed >= 1) {
+    dbgState.videoFps = Math.round((dbgState.videoFrames - _dbgFrameCount) / elapsed);
+    _dbgFrameCount = dbgState.videoFrames;
+    _dbgLastFpsTime = now;
+  }
+  document.getElementById('dbg-content').textContent =
+    `WS: ${dbgState.wsState}\n` +
+    `Sent: ${dbgState.lastSent}\n` +
+    `Status: ${dbgState.lastStatus}\n` +
+    `Video: ${dbgState.videoFps} fps (${dbgState.videoFrames} total)\n` +
+    (dbgState.errors.length ? 'ERR: ' + dbgState.errors.slice(-2).join(' | ') : '');
+}
+setInterval(dbgUpdate, 500);
+
+// ── WebSocket ─────────────────────────────────────────────────
+let ws = null;
+let wsReady = false;
+let reconnectTimer = null;
+
+function wsConnect() {
+  if (ws && (ws.readyState === WebSocket.CONNECTING ||
+             ws.readyState === WebSocket.OPEN)) return;
+
+  const url = 'ws://' + location.host;
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  dbgState.wsState = 'CONNECTING';
+
+  ws.addEventListener('open', () => {
+    wsReady = true;
+    dbgState.wsState = 'OPEN';
+    setConnState('ok');
+  });
+
+  ws.addEventListener('close', () => {
+    wsReady = false;
+    dbgState.wsState = 'CLOSED';
+    setConnState('off');
+    scheduleReconnect();
+  });
+
+  ws.addEventListener('error', (e) => {
+    wsReady = false;
+    dbgState.wsState = 'ERROR';
+    dbgState.errors.push('ws-err ' + new Date().toLocaleTimeString());
+    setConnState('off');
+  });
+
+  ws.addEventListener('message', onMessage);
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  setConnState('mid');
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    wsConnect();
+  }, 1000);
+}
+
+function sendJSON(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    if (motorSequence && obj.type !== 'motor-test') motorSequence = false;
+    if (['land', 'director-cancel', 'stick-touch'].includes(obj.type)) {
+      clearDirectorCountdown('Cancelled');
+    }
+    const s = JSON.stringify(obj);
+    ws.send(s);
+    if (obj.type === 'move') console.info('[MOVE] → server', s);
+    dbgState.lastSent = s.length > 60 ? s.slice(0, 57) + '…' : s;
+  }
+}
+
+function setConnState(state) {
+  const dot   = document.getElementById('conn-dot');
+  const label = document.getElementById('conn-label');
+  dot.className = '';
+  if      (state === 'ok')  { dot.classList.add('ok');  label.textContent = 'Connected'; }
+  else if (state === 'mid') { dot.classList.add('mid'); label.textContent = 'Reconnecting…'; }
+  else                      { label.textContent = 'Disconnected'; }
+}
+
+// ── Video ─────────────────────────────────────────────────────
+let videoPlaceholderVisible = true;
+let decoding = false;
+let videoReady = false;
+const canvas      = document.getElementById('video-canvas');
+const ctx         = canvas.getContext('2d');
+const placeholder = document.getElementById('video-placeholder');
+
+function drawVideoFrame(image) {
+  if (canvas.width !== image.width || canvas.height !== image.height) {
+    canvas.width = image.width;
+    canvas.height = image.height;
+  }
+  ctx.drawImage(image, 0, 0);
+  videoReady = true;
+  if (videoPlaceholderVisible) {
+    placeholder.style.display = 'none';
+    videoPlaceholderVisible = false;
+  }
+}
+
+function onMessage(evt) {
+  if (evt.data instanceof ArrayBuffer) {
+    dbgState.videoFrames++;
+    if (decoding) return;
+    decoding = true;
+    const blob = new Blob([evt.data], { type: 'image/png' });
+    if (typeof createImageBitmap !== 'function') {
+      const image = new Image();
+      const url = URL.createObjectURL(blob);
+      image.onload = () => {
+        drawVideoFrame(image);
+        URL.revokeObjectURL(url);
+        decoding = false;
+      };
+      image.onerror = () => {
+        dbgState.errors.push('imgdec image load failed');
+        URL.revokeObjectURL(url);
+        decoding = false;
+      };
+      image.src = url;
+      return;
+    }
+    createImageBitmap(blob).then((bmp) => {
+      drawVideoFrame(bmp);
+      bmp.close();
+    }).catch((e) => {
+      dbgState.errors.push('imgdec ' + e.message);
+    }).finally(() => { decoding = false; });
+    return;
+  }
+
+  let msg;
+  try { msg = JSON.parse(evt.data); } catch (_) { return; }
+  if (msg && msg.type === 'status') updateStatus(msg);
+  if (msg && msg.type === 'notice') {
+    dbgState.errors.push(msg.message);
+    document.getElementById('conn-label').textContent = msg.message;
+    if (msg.message.startsWith('Motor test')) motorSequence = false;
+  }
+}
+
+// ── Status ────────────────────────────────────────────────────
+let currentAlt = 0, currentMaxAlt = 10.0, currentFlying = false;
+let currentBattery = null;
+let currentMode = 'manual';
+let storedModePreference = 'manual';
+let restoreModeAttempted = false;
+let pendingModeSelection = null;
+let safetyState = { enabled: true, batteryThreshold: 20 };
+let motorTestState = { active: false, result: 'not tested' };
+try { storedModePreference = localStorage.getItem('ardrone.lastMode') || 'manual'; } catch (_) {}
+
+function updateStatus(msg) {
+  if (typeof msg.altitude === 'number') currentAlt    = msg.altitude;
+  if (typeof msg.maxAlt   === 'number') currentMaxAlt = msg.maxAlt;
+  if (typeof msg.flying   === 'boolean') currentFlying = msg.flying;
+  if (typeof msg.battery === 'number') currentBattery = msg.battery;
+  if (typeof msg.mode === 'string') {
+    currentMode = msg.mode;
+    document.getElementById('mode-badge').textContent = msg.mode.replace('-', ' ').toUpperCase();
+    if (currentMode === pendingModeSelection) pendingModeSelection = null;
+    if (!pendingModeSelection && currentMode !== 'manual') {
+      storedModePreference = currentMode;
+      try { localStorage.setItem('ardrone.lastMode', currentMode); } catch (_) {}
+    } else if (!pendingModeSelection && !restoreModeAttempted && storedModePreference !== 'manual' &&
+               !msg.flying && wsReady) {
+      restoreModeAttempted = true;
+      sendJSON({ type: 'mode', id: storedModePreference });
+    }
+    if (currentMode === 'indoor' || currentMode === 'outdoor') {
+      document.getElementById('hull-select').value = currentMode;
+    }
+  }
+  if (msg.safety && typeof msg.safety.enabled === 'boolean') safetyState = msg.safety;
+  let motorStatusChanged = false;
+  if (msg.motorTest) {
+    motorStatusChanged = motorTestState.active !== msg.motorTest.active;
+    motorTestState = msg.motorTest;
+    if (motorStatusChanged && !msg.motorTest.active) {
+      for (const id of Object.keys(motorResults)) {
+        if (motorResults[id] === 'testing') motorResults[id] = 'unknown (feedback unavailable)';
+      }
+    }
+  }
+  const hasNavdata = msg.navdata !== false;
+
+  dbgState.lastStatus = hasNavdata
+    ? `alt=${currentAlt.toFixed(2)} bat=${msg.battery} fly=${currentFlying}`
+    : 'navdata=NO';
+
+  if (typeof msg.battery === 'number') {
+    document.getElementById('bat-display').textContent = msg.battery;
+  } else if (!hasNavdata) {
+    document.getElementById('bat-display').textContent = '--';
+  }
+
+  const altEl = document.getElementById('alt-display');
+  altEl.textContent = hasNavdata
+    ? currentAlt.toFixed(1) + ' / ' + currentMaxAlt.toFixed(1) + ' m'
+    : '-- / ' + currentMaxAlt.toFixed(1) + ' m';
+  altEl.classList.toggle('near-limit', hasNavdata && currentAlt >= currentMaxAlt - 0.1);
+
+  document.getElementById('fly-badge').classList.toggle('on', currentFlying);
+  if (typeof msg.mock === 'boolean') {
+    document.getElementById('conn-label').textContent = msg.mock
+      ? 'Connected · MOCK'
+      : hasNavdata ? 'Connected · LIVE' : 'Connected · LIVE · NO NAVDATA';
+  }
+
+  const limSlider = document.getElementById('limit-slider');
+  if (Math.abs(parseFloat(limSlider.value) - currentMaxAlt) > 0.05) {
+    limSlider.value = currentMaxAlt;
+    document.getElementById('limit-val').textContent = currentMaxAlt.toFixed(1) + ' m';
+  }
+  renderModeStatus(msg);
+  if (motorStatusChanged && document.getElementById('mode-panel').classList.contains('open')) {
+    renderModeTools();
+  }
+}
+
+// ── Commands ──────────────────────────────────────────────────
+function cmdTakeoff() { sendJSON({ type: 'takeoff' }); }
+function cmdLand()    { sendJSON({ type: 'land' });    }
+function cmdFtrim()   { sendJSON({ type: 'ftrim' });   }
+function cmdReset()   { sendJSON({ type: 'reset' });   }
+
+// ── Settings ──────────────────────────────────────────────────
+function openSettings()  { document.getElementById('settings-panel').classList.add('open'); }
+function closeSettings() { document.getElementById('settings-panel').classList.remove('open'); }
+function closeSettingsIfBg(e) {
+  if (e.target === document.getElementById('settings-panel')) closeSettings();
+}
+function onLimitChange(val) {
+  const v = Math.max(0.5, Math.min(10, parseFloat(val)));
+  document.getElementById('limit-val').textContent = v.toFixed(1) + ' m';
+  sendJSON({ type: 'limit', value: v });
+}
+let speedScale = 0.30;
+function onSpeedChange(val) {
+  const percent = Math.max(10, Math.min(100, parseInt(val, 10) || 10));
+  speedScale = percent / 100;
+  document.getElementById('speed-slider').value = percent;
+  document.getElementById('speed-val').textContent = percent + '%';
+}
+
+// ── Modes and auxiliary flight tools ───────────────────────────
+let modeCatalog = [];
+let tiltHeld = false;
+let tiltZero = { beta: 0, gamma: 0 };
+let tiltFiltered = { pitch: 0, roll: 0 };
+let tiltReading = { beta: 0, gamma: 0, heading: null };
+let raceStartedAt = 0, raceLapStartedAt = 0, raceLaps = [], raceBest = null;
+let directorCountdownTimer = null;
+let directorClientCountdownActive = false;
+let motorSequence = false;
+let motorHeldActive = false;
+let motorPanelOpen = false;
+let motorTestArmed = false;
+let renderedModeStatusKey = '';
+const motorLabels = [
+  ['front-left', 'Front left'], ['front-right', 'Front right'],
+  ['rear-left', 'Rear left'], ['rear-right', 'Rear right']
+];
+const motorResults = Object.fromEntries(motorLabels.map(([id]) => [id, 'not tested']));
+
+function openModePanel() {
+  document.getElementById('mode-panel').classList.add('open');
+  renderModePanel();
+}
+function closeModePanel() { document.getElementById('mode-panel').classList.remove('open'); }
+function closeModeIfBg(event) {
+  if (event.target === document.getElementById('mode-panel')) closeModePanel();
+}
+function downloadFlightLog() { location.href = '/flight-log.csv'; }
+
+function renderModePanel() {
+  const list = document.getElementById('mode-list');
+  list.replaceChildren();
+  for (const mode of modeCatalog) {
+    const button = document.createElement('button');
+    button.className = 'mode-choice';
+    button.textContent = mode.name + (mode.id === currentMode ? ' · ACTIVE' : '');
+    if (!mode.available) button.title = mode.reason;
+    button.addEventListener('click', () => selectMode(mode));
+    list.appendChild(button);
+  }
+  renderModeTools();
+}
+
+function selectMode(mode) {
+  const detail = document.getElementById('mode-detail');
+  if (!mode.available) {
+    detail.textContent = mode.reason || 'This mode is unavailable on the detected drone firmware.';
+    if (mode.id === 'test-motors') { motorPanelOpen = true; renderModeTools(); }
+    if (mode.id === 'calibration') {
+      detail.textContent = '1. On a level surface, with the drone landed, press Flat Trim in Settings.\n2. Magnetometer calibration is disabled until stock-firmware AT*CALIB semantics are verified.';
+    }
+    return;
+  }
+  if (mode.id === 'safety') {
+    sendJSON({ type: 'safety-toggle', enabled: !safetyState.enabled });
+    detail.textContent = 'Safety is an independent toggle and does not replace the current flight mode.';
+    return;
+  }
+  if (currentFlying) {
+    detail.textContent = 'Modes can only be changed while landed. Safety remains available in flight.';
+    return;
+  }
+  sendJSON({ type: 'mode', id: mode.id });
+  motorPanelOpen = false;
+  storedModePreference = mode.id;
+  pendingModeSelection = mode.id;
+  restoreModeAttempted = true;
+  try { localStorage.setItem('ardrone.lastMode', mode.id); } catch (_) {}
+  detail.textContent = `Requesting ${mode.name} preset…`;
+  if (mode.id === 'tilt') requestOrientationPermission();
+  if (mode.id === 'training') {
+    try {
+      if (!localStorage.getItem('ardrone.trainingHintSeen')) {
+        alert('TRAINING: gentle controls, 1.5 m height limit, indoor settings, and flips disabled.');
+        localStorage.setItem('ardrone.trainingHintSeen', '1');
+      }
+    } catch (_) {}
+  }
+  renderModePanel();
+}
+
+function renderModeTools() {
+  const tools = document.getElementById('mode-tools');
+  tools.replaceChildren();
+  const safety = document.createElement('div');
+  safety.className = 'mode-controls';
+  const safeToggle = document.createElement('button');
+  safeToggle.id = 'safety-toggle-button';
+  safeToggle.className = 'mode-action';
+  safeToggle.textContent = `Safety ${safetyState.enabled ? 'ON' : 'OFF'} (independent toggle)`;
+  safeToggle.onclick = () => sendJSON({
+    type: 'safety-toggle', enabled: !safetyState.enabled,
+    threshold: parseInt(document.getElementById('safety-threshold').value, 10)
+  });
+  const thresholdLabel = document.createElement('label');
+  thresholdLabel.id = 'safety-threshold-label';
+  thresholdLabel.textContent = `Auto-land at ${safetyState.batteryThreshold}% battery`;
+  const threshold = document.createElement('input');
+  threshold.id = 'safety-threshold';
+  threshold.type = 'range'; threshold.min = '10'; threshold.max = '50'; threshold.step = '1';
+  threshold.value = String(safetyState.batteryThreshold);
+  threshold.oninput = () => {
+    thresholdLabel.textContent = `Auto-land at ${threshold.value}% battery`;
+    sendJSON({ type: 'safety-toggle', enabled: safetyState.enabled, threshold: Number(threshold.value) });
+  };
+  safety.append(safeToggle, thresholdLabel, threshold);
+  const hover = document.createElement('button');
+  hover.className = 'mode-action';
+  hover.textContent = 'Emergency hover';
+  hover.onclick = () => sendJSON({ type: 'emergency-hover' });
+  safety.appendChild(hover);
+  tools.appendChild(safety);
+
+  if (currentMode === 'test-motors' || motorPanelOpen) renderMotorTools();
+  else if (currentMode === 'director') renderDirectorTools();
+  else if (currentMode === 'race') renderRaceTools();
+  else if (currentMode === 'tilt') renderTiltTools();
+  else if (currentMode === 'calibration') {
+    const text = document.createElement('div');
+    text.id = 'mode-detail';
+    text.textContent = '1. On a level surface, with the drone landed, press Flat Trim in Settings.\n2. Magnetometer calibration needs verified stock-firmware AT*CALIB semantics; that step is intentionally disabled.';
+    tools.appendChild(text);
+  }
+  if (currentMode === 'flip') {
+    const warning = document.createElement('div');
+    warning.id = 'mode-detail';
+    warning.textContent = 'Flip mode requires a documented animation ID, battery ≥30%, altitude ≥1.0 m, and a flying drone. The command is not enabled because the verified SDK does not specify a flip ID.';
+    tools.appendChild(warning);
+  }
+  if (currentMode === 'absolute') {
+    const explanation = document.createElement('div');
+    explanation.id = 'mode-detail';
+    explanation.textContent = 'Unavailable: the verified AR.Drone 2.0 SDK does not document PCMD_MAG. No undocumented command will be sent.';
+    tools.appendChild(explanation);
+  }
+}
+
+function renderMotorTools() {
+  const tools = document.getElementById('mode-tools');
+  const safety = document.createElement('div');
+  safety.id = 'motor-safety';
+  safety.textContent = motorTestArmed
+    ? 'Propellers confirmed removed · tests armed'
+    : 'Propeller removal confirmation required';
+  tools.appendChild(safety);
+  const arm = document.createElement('button');
+  arm.className = 'mode-action'; arm.textContent = motorTestArmed ? 'Disarm motor tests' : 'Arm motor tests';
+  arm.onclick = () => {
+    if (motorTestArmed) {
+      motorTestArmed = false;
+      renderModeTools();
+    } else openMotorConfirm();
+  };
+  tools.appendChild(arm);
+  const power = document.createElement('label');
+  power.className = 'mode-controls';
+  power.append('Power (max 30%, default 15%) ');
+  const slider = document.createElement('input');
+  slider.type = 'range'; slider.min = '1'; slider.max = '30'; slider.value = '15'; slider.id = 'motor-power';
+  power.appendChild(slider); tools.appendChild(power);
+  const diagram = document.createElement('div');
+  diagram.id = 'motor-diagram';
+  for (const [id, title] of motorLabels) {
+    const button = document.createElement('button');
+    button.className = 'motor-button'; button.textContent = `${title}: ${motorResults[id]}`;
+    button.onpointerdown = (event) => beginMotorTest(event, id);
+    button.onpointerup = stopMotorTest;
+    button.onpointercancel = stopMotorTest;
+    button.onlostpointercapture = stopMotorTest;
+    diagram.appendChild(button);
+  }
+  tools.appendChild(diagram);
+  const sequence = document.createElement('button');
+  sequence.className = 'mode-action'; sequence.textContent = 'Test all in sequence';
+  sequence.onclick = runMotorSequence;
+  tools.appendChild(sequence);
+  const legend = document.createElement('div');
+  legend.id = 'mode-detail';
+  legend.textContent = 'Motor LED: green = ready; red = error; orange = emergency/initialization. Stock-firmware per-motor PWM/current feedback is unavailable; status will be Unknown. SDK note: AT*PWM is prototype-only. No motors are driven in mock mode.';
+  tools.appendChild(legend);
+}
+
+function openMotorConfirm() {
+  if (currentFlying) { alert('Motor test refused: the drone must be landed.'); return; }
+  if (currentBattery === null || currentBattery < 30) {
+    alert('Motor test refused: battery must be at least 30%.');
+    return;
+  }
+  document.getElementById('motor-confirm-removed').checked = false;
+  document.getElementById('motor-confirm-overlay').classList.add('open');
+}
+function closeMotorConfirm() {
+  document.getElementById('motor-confirm-overlay').classList.remove('open');
+}
+function confirmMotorArm() {
+  if (!document.getElementById('motor-confirm-removed').checked) {
+    alert('Confirm that all four propellers are removed before continuing.');
+    return;
+  }
+  if (!window.confirm('Second confirmation: all four propellers are physically removed. Continue?')) return;
+  motorTestArmed = true;
+  closeMotorConfirm();
+  renderModeTools();
+}
+function motorChecksPassed() {
+  if (currentFlying) { alert('Motor test refused: the drone must be landed.'); return false; }
+  if (currentBattery === null || currentBattery < 30) { alert('Motor test refused: battery must be at least 30%.'); return false; }
+  if (!motorTestArmed) {
+    openMotorConfirm();
+    return false;
+  }
+  return true;
+}
+function beginMotorTest(event, motor) {
+  event.preventDefault();
+  event.currentTarget.setPointerCapture(event.pointerId);
+  if (!motorChecksPassed()) return;
+  const power = Math.min(30, Math.max(1, Number(document.getElementById('motor-power').value))) / 100;
+  motorResults[motor] = 'testing';
+  motorHeldActive = true;
+  event.currentTarget.textContent = `${motor.replace('-', ' ')}: testing`;
+  sendJSON({ type: 'motor-test', motor, power, propsRemoved: true, confirmed: true });
+}
+function stopMotorTest() {
+  if (!motorHeldActive) return;
+  motorHeldActive = false;
+  if (wsReady) sendJSON({ type: 'motor-test-stop' });
+  for (const id of Object.keys(motorResults)) {
+    if (motorResults[id] === 'testing') motorResults[id] = 'unknown (feedback unavailable)';
+  }
+  if (document.getElementById('mode-panel').classList.contains('open')) renderModeTools();
+}
+async function runMotorSequence() {
+  if (!motorChecksPassed()) return;
+  motorSequence = true;
+  const sequenceId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  for (let index = 0; index < motorLabels.length; index++) {
+    if (!motorSequence) break;
+    const [id] = motorLabels[index];
+    const power = Math.min(30, Number(document.getElementById('motor-power').value)) / 100;
+    motorResults[id] = 'simulated / unknown';
+    sendJSON({
+      type: 'motor-test', motor: id, power, propsRemoved: true, confirmed: true,
+      sequenceId, sequenceStart: index === 0
+    });
+    if (document.getElementById('mode-panel').classList.contains('open')) renderModeTools();
+    await new Promise((resolve) => setTimeout(resolve, 2100));
+  }
+  if (motorSequence && wsReady) sendJSON({ type: 'motor-test-sequence-stop' });
+  motorSequence = false;
+}
+
+const directorShots = [
+  ['turn', 'Slow 360° turn'], ['dolly', 'Dolly forward then back'],
+  ['reveal', 'Rise and reveal'], ['slide', 'Gentle left-to-right slide']
+];
+function renderDirectorTools() {
+  const tools = document.getElementById('mode-tools');
+  const state = document.createElement('div');
+  state.id = 'director-state';
+  state.textContent = 'Ready';
+  tools.appendChild(state);
+  const progress = document.createElement('progress');
+  progress.id = 'director-progress'; progress.max = 1; progress.value = 0;
+  tools.appendChild(progress);
+  const buttons = document.createElement('div');
+  buttons.className = 'mode-controls';
+  for (const [id, title] of directorShots) {
+    const button = document.createElement('button');
+    button.className = 'mode-action'; button.textContent = title;
+    button.onclick = () => {
+      if (!currentFlying) { alert('Director scripts require the drone to be flying.'); return; }
+      if (!window.confirm('Script starts after a 3 second countdown. Keep clear and press LAND to stop.')) return;
+      sendJSON({ type: 'director-start', shot: id });
+      beginDirectorCountdown(id);
+    };
+    buttons.appendChild(button);
+  }
+  const cancel = document.createElement('button');
+  cancel.className = 'mode-action'; cancel.textContent = 'Cancel script';
+  cancel.onclick = () => sendJSON({ type: 'director-cancel' });
+  buttons.appendChild(cancel); tools.appendChild(buttons);
+}
+function beginDirectorCountdown(shot) {
+  if (directorCountdownTimer) clearInterval(directorCountdownTimer);
+  directorClientCountdownActive = true;
+  let seconds = 3;
+  const state = document.getElementById('director-state');
+  if (state) state.textContent = `Starting in ${seconds}…`;
+  directorCountdownTimer = setInterval(() => {
+    seconds -= 1;
+    const current = document.getElementById('director-state');
+    if (!current) return;
+    if (seconds > 0) current.textContent = `Starting in ${seconds}…`;
+    else {
+      current.textContent = `Running: ${shot}`;
+      clearInterval(directorCountdownTimer);
+      directorCountdownTimer = null;
+      directorClientCountdownActive = false;
+    }
+  }, 1000);
+}
+function clearDirectorCountdown(message) {
+  if (directorCountdownTimer) clearInterval(directorCountdownTimer);
+  directorCountdownTimer = null;
+  directorClientCountdownActive = false;
+  const state = document.getElementById('director-state');
+  if (state) state.textContent = message;
+}
+function renderRaceTools() {
+  const tools = document.getElementById('mode-tools');
+  const time = document.createElement('div');
+  time.id = 'race-time'; time.style.fontSize = '30px'; time.textContent = '00:00.000';
+  tools.appendChild(time);
+  const actions = document.createElement('div'); actions.className = 'mode-controls';
+  for (const [label, event] of [['Start', 'start'], ['Lap', 'lap'], ['Stop', 'stop']]) {
+    const button = document.createElement('button'); button.className = 'mode-action';
+    button.textContent = label;
+    button.onclick = () => raceAction(event);
+    actions.appendChild(button);
+  }
+  tools.appendChild(actions);
+  const summary = document.createElement('div'); summary.id = 'mode-detail';
+  summary.textContent = `Best lap: ${raceBest === null ? '—' : formatLap(raceBest)}\nLaps: ${raceLaps.map(formatLap).join(', ') || '—'}`;
+  tools.appendChild(summary);
+}
+function raceAction(action) {
+  const now = Date.now();
+  if (action === 'start') {
+    raceStartedAt = raceLapStartedAt = now; raceLaps = [];
+  } else if (action === 'lap' && raceLapStartedAt) {
+    const lap = now - raceLapStartedAt; raceLaps.push(lap);
+    raceBest = raceBest === null ? lap : Math.min(raceBest, lap);
+    raceLapStartedAt = now;
+  } else if (action === 'stop') raceStartedAt = raceLapStartedAt = 0;
+  const lapMs = action === 'lap' ? raceLaps[raceLaps.length - 1] : 0;
+  sendJSON({ type: 'race-event', event: action, lap: raceLaps.length, lapMs });
+  if (document.getElementById('mode-panel').classList.contains('open')) renderModeTools();
+}
+function formatLap(ms) {
+  return `${Math.floor(ms / 60000).toString().padStart(2, '0')}:${((ms % 60000) / 1000).toFixed(3).padStart(6, '0')}`;
+}
+setInterval(() => {
+  const display = document.getElementById('race-time');
+  if (display && raceStartedAt) display.textContent = formatLap(Date.now() - raceStartedAt);
+}, 50);
+
+function renderTiltTools() {
+  const tools = document.getElementById('mode-tools');
+  const zero = document.createElement('button'); zero.className = 'mode-action';
+  zero.textContent = 'Set current tilt as zero'; zero.onclick = () => {
+    tiltZero = { beta: tiltReading.beta, gamma: tiltReading.gamma };
+  };
+  tools.appendChild(zero);
+  const note = document.createElement('div'); note.id = 'mode-detail';
+  note.textContent = 'Right-stick input is replaced by tilt. Hold the on-screen control area to move; let go to hover. A deadzone and smoothing filter are applied.';
+  tools.appendChild(note);
+  document.body.classList.add('tilt-mode');
+}
+async function requestOrientationPermission() {
+  if (typeof DeviceOrientationEvent === 'undefined') {
+    document.getElementById('mode-detail').textContent = 'Device orientation is unavailable; TILT mode cannot control the drone.';
+    return;
+  }
+  try {
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+      const permission = await DeviceOrientationEvent.requestPermission();
+      if (permission !== 'granted') throw new Error('permission denied');
+    }
+    window.addEventListener('deviceorientation', onDeviceOrientation);
+  } catch (error) {
+    document.getElementById('mode-detail').textContent = `Device orientation permission failed: ${error.message}`;
+  }
+}
+function onDeviceOrientation(event) {
+  if (typeof event.beta === 'number' && typeof event.gamma === 'number') {
+    tiltReading.beta = event.beta; tiltReading.gamma = event.gamma;
+  }
+  if (typeof event.alpha === 'number') tiltReading.heading = event.alpha;
+}
+function enableTiltHold(event) {
+  event.preventDefault();
+  event.currentTarget.setPointerCapture(event.pointerId);
+  tiltHeld = true; rightActive = true; startMoveLoop();
+}
+function disableTiltHold() {
+  tiltHeld = false; rightActive = false; axPitch = axRoll = 0;
+  if (!leftActive) stopMoveLoop();
+}
+function onHullChange(value) {
+  if (currentFlying) {
+    document.getElementById('hull-select').value = 'indoor';
+    alert('Hull presets can only be changed while landed.');
+    return;
+  }
+  sendJSON({ type: 'hull', value });
+}
+function renderModeStatus(msg) {
+  if (Array.isArray(msg.modes)) modeCatalog = msg.modes;
+  document.body.classList.toggle('tilt-mode', currentMode === 'tilt');
+  const progress = document.getElementById('director-progress');
+  if (progress && msg.director) progress.value = msg.director.progress;
+  else if (progress) progress.value = 0;
+  const directorState = document.getElementById('director-state');
+  if (directorState && msg.director) {
+    directorState.textContent = msg.director
+      ? msg.director.countdown > 0 ? `Starting in ${msg.director.countdown}…` : `Running: ${msg.director.shot}`
+      : 'Ready';
+  } else if (directorState && !directorClientCountdownActive) {
+    directorState.textContent = 'Ready';
+  }
+  const statusKey = `${currentMode}|${modeCatalog.length}`;
+  if (statusKey !== renderedModeStatusKey &&
+      document.getElementById('mode-panel').classList.contains('open')) {
+    renderedModeStatusKey = statusKey;
+    renderModePanel();
+  } else if (document.getElementById('mode-panel').classList.contains('open')) {
+    const toggle = document.getElementById('safety-toggle-button');
+    const threshold = document.getElementById('safety-threshold');
+    const label = document.getElementById('safety-threshold-label');
+    if (toggle) toggle.textContent = `Safety ${safetyState.enabled ? 'ON' : 'OFF'} (independent toggle)`;
+    if (threshold) {
+      if (document.activeElement !== threshold) threshold.value = String(safetyState.batteryThreshold);
+      if (label) label.textContent = `Auto-land at ${safetyState.batteryThreshold}% battery`;
+    }
+  }
+}
+
+// ── Photo ─────────────────────────────────────────────────────
+function cmdPhoto() {
+  if (!videoReady) {
+    dbgState.errors.push('Photo unavailable: no decoded video frame yet.');
+    document.getElementById('conn-label').textContent = 'No video frame to photograph';
+    return;
+  }
+  const ts   = new Date().toISOString().replace(/[:.]/g, '-');
+  const link = document.createElement('a');
+  canvas.toBlob((blob) => {
+    if (!blob) {
+      dbgState.errors.push('Photo unavailable: browser could not create the PNG.');
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    link.href = url;
+    link.download = 'drone-' + ts + '.png';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, 'image/png');
+  const flash = document.getElementById('flash');
+  flash.classList.add('flash-on');
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    flash.classList.remove('flash-on');
+    flash.classList.add('flash-off');
+    setTimeout(() => flash.classList.remove('flash-off'), 400);
+  }));
+}
+
+// ── Recording ─────────────────────────────────────────────────
+let mediaRecorder = null, recChunks = [], recInterval = null, recStart = 0;
+
+function cmdRecord() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') { stopRecord(); return; }
+  startRecord();
+}
+function pickMimeType() {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') return '';
+  const c = ['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm','video/mp4;codecs=avc1'];
+  for (const m of c) { if (MediaRecorder.isTypeSupported(m)) return m; }
+  return '';
+}
+function startRecord() {
+  if (!videoReady) {
+    dbgState.errors.push('Recording unavailable: no decoded video frame yet.');
+    document.getElementById('conn-label').textContent = 'No video frame to record';
+    return;
+  }
+  if (typeof MediaRecorder === 'undefined' || typeof canvas.captureStream !== 'function') {
+    const message = 'Recording is not supported by this browser.';
+    dbgState.errors.push(message);
+    alert(message);
+    return;
+  }
+  const mime   = pickMimeType();
+  let stream;
+  try {
+    stream = canvas.captureStream(15);
+    mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : {});
+  }
+  catch (e) { alert('Recording not supported: ' + e.message); return; }
+  recChunks = [];
+  mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recChunks.push(e.data); };
+  mediaRecorder.onerror = (e) => {
+    dbgState.errors.push('Recording error: ' + (e.error ? e.error.message : 'unknown error'));
+  };
+  mediaRecorder.onstop = () => {
+    clearInterval(recInterval);
+    document.getElementById('btn-record').classList.remove('recording');
+    document.getElementById('rec-timer').textContent = '';
+    const finalMime = mediaRecorder.mimeType || mime || 'video/webm';
+    const ext       = finalMime.includes('mp4') ? 'mp4' : 'webm';
+    const blob      = new Blob(recChunks, { type: finalMime });
+    if (!blob.size) {
+      dbgState.errors.push('Recording unavailable: browser produced an empty video.');
+      return;
+    }
+    const ts        = new Date().toISOString().replace(/[:.]/g, '-');
+    const url       = URL.createObjectURL(blob);
+    const a         = document.createElement('a');
+    a.href = url; a.download = 'drone-' + ts + '.' + ext; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  mediaRecorder.start(500);
+  recStart = Date.now();
+  document.getElementById('btn-record').classList.add('recording');
+  recInterval = setInterval(() => {
+    const s = Math.floor((Date.now() - recStart) / 1000);
+    const m = Math.floor(s / 60);
+    document.getElementById('rec-timer').textContent =
+      (m > 0 ? m + ':' : '') + String(s % 60).padStart(2, '0');
+  }, 1000);
+}
+function stopRecord() {
+  if (mediaRecorder) mediaRecorder.stop();
+  clearInterval(recInterval);
+  document.getElementById('btn-record').classList.remove('recording');
+  document.getElementById('rec-timer').textContent = '';
+}
+
+// ── Move loop ─────────────────────────────────────────────────
+let moveInterval = null;
+let leftActive = false, rightActive = false;
+let axYaw = 0, axGaz = 0, axRoll = 0, axPitch = 0;
+
+function startMoveLoop() {
+  if (moveInterval) return;
+  moveInterval = setInterval(() => {
+    if (!leftActive && !rightActive) return;
+    if (currentMode === 'tilt' && tiltHeld) {
+      const rawPitch = clamp01((tiltReading.beta - tiltZero.beta) / 30);
+      const rawRoll = clamp01((tiltReading.gamma - tiltZero.gamma) / 30);
+      tiltFiltered.pitch = tiltFiltered.pitch * 0.75 + applyDeadzone(rawPitch) * 0.25;
+      tiltFiltered.roll = tiltFiltered.roll * 0.75 + applyDeadzone(rawRoll) * 0.25;
+      axPitch = tiltFiltered.pitch;
+      axRoll = tiltFiltered.roll;
+    }
+    sendJSON({
+      type : 'move',
+      pitch: round3(axPitch * speedScale),
+      roll : round3(axRoll  * speedScale),
+      yaw  : round3(axYaw   * speedScale),
+      gaz  : round3(axGaz   * speedScale)
+    });
+  }, 50);
+}
+function stopMoveLoop() {
+  if (moveInterval) { clearInterval(moveInterval); moveInterval = null; }
+  sendJSON({ type: 'stop' });
+}
+function round3(v) { return Math.round(v * 1000) / 1000; }
+
+// ── Joystick ──────────────────────────────────────────────────
+const DEADZONE = 0.08;
+function clamp01(v) { return Math.max(-1, Math.min(1, v)); }
+function applyDeadzone(v) {
+  if (Math.abs(v) < DEADZONE) return 0;
+  return (v - Math.sign(v) * DEADZONE) / (1 - DEADZONE);
+}
+
+function makeJoystick(baseEl, knobEl, onMove, onRelease) {
+  let activePointers = new Map();
+  let originX = 0, originY = 0, baseR = 0, primaryId = null;
+
+  function updateKnob(nx, ny) {
+    const angle = Math.atan2(ny, nx);
+    const cx = Math.cos(angle) * Math.min(1, Math.abs(nx)) * baseR * 0.4;
+    const cy = Math.sin(angle) * Math.min(1, Math.abs(ny)) * baseR * 0.4;
+    knobEl.style.transform = 'translate(calc(-50% + ' + cx + 'px), calc(-50% + ' + cy + 'px))';
+  }
+  function resetKnob() {
+    knobEl.style.transform = 'translate(-50%, -50%)';
+    knobEl.classList.remove('active');
+  }
+  function getCenter() {
+    const r = baseEl.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2, r: r.width / 2 };
+  }
+  function updateFromPointer(x, y) {
+    const dx = x - originX;
+    const dy = y - originY;
+    const nx = clamp01(dx / baseR);
+    const ny = clamp01(dy / baseR);
+    const mag = Math.sqrt(nx * nx + ny * ny);
+    const sc  = mag > 1 ? 1 / mag : 1;
+    const fx  = nx * sc, fy = ny * sc;
+    onMove(applyDeadzone(fx), applyDeadzone(fy));
+    updateKnob(fx, fy);
+  }
+
+  baseEl.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    baseEl.setPointerCapture(e.pointerId);
+    sendJSON({ type: 'stick-touch' });
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (primaryId === null) {
+      primaryId = e.pointerId;
+      const c = getCenter();
+      originX = c.x; originY = c.y; baseR = c.r;
+      updateFromPointer(e.clientX, e.clientY);
+    }
+    knobEl.classList.add('active');
+    startMoveLoop();
+  });
+
+  baseEl.addEventListener('pointermove', (e) => {
+    if (!activePointers.has(e.pointerId)) return;
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (e.pointerId !== primaryId) return;
+    updateFromPointer(e.clientX, e.clientY);
+  });
+
+  function handleUp(e) {
+    activePointers.delete(e.pointerId);
+    if (e.pointerId === primaryId) {
+      primaryId = null;
+      if (activePointers.size > 0) {
+        primaryId = activePointers.keys().next().value;
+        const c = getCenter();
+        originX = c.x; originY = c.y; baseR = c.r;
+        const pointer = activePointers.get(primaryId);
+        updateFromPointer(pointer.x, pointer.y);
+      } else {
+        onRelease();
+        resetKnob();
+      }
+    } else if (activePointers.size === 0) {
+      onRelease();
+      resetKnob();
+    }
+  }
+
+  baseEl.addEventListener('pointerup',     handleUp);
+  baseEl.addEventListener('pointercancel', handleUp);
+}
+
+// Left stick → yaw (X) + gaz (Y, inverted)
+makeJoystick(
+  document.getElementById('base-left'),
+  document.getElementById('knob-left'),
+  (nx, ny) => { leftActive = true;  axYaw = nx; axGaz = -ny; },
+  ()       => { leftActive = false; axYaw = 0;  axGaz = 0;  if (!rightActive) stopMoveLoop(); }
+);
+
+// Right stick → roll (X) + pitch (Y, inverted)
+makeJoystick(
+  document.getElementById('base-right'),
+  document.getElementById('knob-right'),
+  (nx, ny) => { rightActive = true;  axRoll = nx; axPitch = -ny; },
+  ()       => { rightActive = false; axRoll = 0;  axPitch = 0;  if (!leftActive) stopMoveLoop(); }
+);
+
+// ── Wake lock ─────────────────────────────────────────────────
+(async () => {
+  try {
+    if ('wakeLock' in navigator) {
+      let lock = await navigator.wakeLock.request('screen');
+      document.addEventListener('visibilitychange', async () => {
+        if (document.visibilityState === 'visible') {
+          lock = await navigator.wakeLock.request('screen').catch(() => null);
+        }
+      });
+    }
+  } catch (_) {}
+})();
+
+// ── Init ──────────────────────────────────────────────────────
+wsConnect();
+</script>
+</body>
+</html>
